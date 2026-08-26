@@ -1,0 +1,17 @@
+# MQTT Broker (Home Assistant Mosquitto recommended)
+mqtt:
+  host: "ha.delrobco.com"          # or the ZeroTier IP / hostname of your HA
+  port: 1883
+  username: ""                    # if required
+  password: ""
+  topic_prefix: "dino/player"
+
+# Local media folder (absolute path recommended)
+media_dir: "/home/pi/dino-media-player/media"
+
+# Default volume (0-100)
+volume: 80
+
+# Force analog output device (usually "Headphones" or "bcm2835 Headphones")
+# Leave empty to use system default
+audio_device: ""

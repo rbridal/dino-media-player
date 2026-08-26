@@ -1,0 +1,16 @@
+[Unit]
+Description=Dino Media Player (MQTT controlled)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/dino-media-player
+ExecStart=/home/pi/dino-media-player/venv/bin/python /home/pi/dino-media-player/dino_player.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
