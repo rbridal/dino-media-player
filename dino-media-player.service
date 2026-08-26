@@ -1,17 +1,19 @@
 [Unit]
 Description=Dino Media Player (MQTT controlled)
-After=network-online.target
+After=network-online.target sound.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=dino
+Group=dino
 WorkingDirectory=/opt/dino-media-player
 ExecStart=/opt/dino-media-player/venv/bin/python /opt/dino-media-player/dino_player.py /opt/dino-media-player/config.yaml
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+# Keep audio devices reachable for the service user
+SupplementaryGroups=audio
 
 [Install]
 WantedBy=multi-user.target
