@@ -7,7 +7,7 @@ mqtt:
   topic_prefix: "dino/player"
 
 # Local media folder (absolute path recommended)
-media_dir: "/home/pi/dino-media-player/media"
+media_dir: "/opt/dino-media-player/media"
 
 # Default volume (0-100)
 volume: 80

@@ -6,8 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/dino-media-player
-ExecStart=/home/pi/dino-media-player/venv/bin/python /home/pi/dino-media-player/dino_player.py
+Group=pi
+WorkingDirectory=/opt/dino-media-player
+ExecStart=/opt/dino-media-player/venv/bin/python /opt/dino-media-player/dino_player.py /opt/dino-media-player/config.yaml
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
