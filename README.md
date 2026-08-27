@@ -1,23 +1,37 @@
 # Dino Media Player
 
+<p align="center">
+  <img src="logo.svg" width="160" height="160" alt="Green Sinclair-style dinosaur on light gray">
+</p>
+
 Lightweight MQTT-controlled media player for Raspberry Pi (headless).
 
-Designed for the outdoor Jurassic Park Dino setup. Plays local audio files through the 3.5mm jack and is controlled by Home Assistant.
+Designed for the outdoor Sinclair dino / Jurassic Park yard setup. Plays local audio files through the 3.5mm jack and is controlled by Home Assistant.
+
+Companion integration: [ha-dino-media-player](https://github.com/rbridal/ha-dino-media-player).
 
 Install path: `/opt/dino-media-player`  
 Service user: `dino` / group `dino` (also in `audio`)
 
+## Logo
+
+Green Sinclair-style sauropod on a solid light gray background. Same mark is used in the Home Assistant integration brand assets.
+
+- [`logo.svg`](logo.svg)
+- [`brand/icon.svg`](brand/icon.svg)
+
 ## Features
-- Plays local audio files (mp3, wav, flac, etc.)
-- Controlled via MQTT (play / pause / resume / stop / set source)
-- Publishes current state and available sources
-- Designed for Raspberry Pi OS Trixie (headless)
-- Runs as a systemd service under `dino`
+- Plays local audio files (mp3, wav, flac, ogg, m4a)
+- MQTT commands: `play`, `stop`, `set_source`
+- Publishes state, current source, source list, position, duration, availability
+- Rescans `/opt/dino-media-player/media` every 5 seconds (no restart to add files)
+- systemd service under `dino`
+- ALSA output to the Pi analog jack (`plughw:2,0` on a Pi 4)
 
 ## Hardware
-- Raspberry Pi 4B
-- Speakers connected to 3.5mm audio jack
-- Placed outdoors near the Dino
+- Raspberry Pi 4B (Trixie, headless)
+- Speakers on the 3.5mm jack
+- Outdoors near the dino statue
 
 ## Requirements
 - Raspberry Pi OS (Trixie or later)
@@ -30,36 +44,29 @@ Service user: `dino` / group `dino` (also in `audio`)
 
 ```bash
 sudo groupadd --system dino
+sudo mkdir -p /opt/dino-media-player
 sudo useradd --system \
   --gid dino \
   --groups audio \
   --home-dir /opt/dino-media-player \
-  --create-home \
   --shell /usr/sbin/nologin \
   --comment "Dino media player service" \
   dino
+sudo chown dino:dino /opt/dino-media-player
 ```
 
-## Quick Start
+## Install
 
 Run these as your admin login (`rbridal`), not as `dino`.
 
 ```bash
 sudo apt update
 sudo apt install -y mpv python3-pip python3-venv git
-
-# Force analog audio output
 sudo raspi-config nonint do_audio 1
 
-# Clone into /opt (home dir may already exist from useradd)
-sudo mkdir -p /opt/dino-media-player
-sudo chown dino:dino /opt/dino-media-player
-
 sudo -u dino git clone https://github.com/rbridal/dino-media-player.git /opt/dino-media-player
-cd /opt/dino-media-player
 
-sudo -u dino mkdir -p media
-# copy audio files into /opt/dino-media-player/media/
+sudo -u dino mkdir -p /opt/dino-media-player/media
 # sudo cp /path/to/jurassic_park_theme.mp3 /opt/dino-media-player/media/
 # sudo chown dino:dino /opt/dino-media-player/media/*
 
@@ -72,19 +79,31 @@ sudo -u dino nano /opt/dino-media-player/config.yaml
 sudo cp /opt/dino-media-player/dino-media-player.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now dino-media-player
-sudo systemctl status dino-media-player --no-pager
 ```
 
-## MQTT Topics (default)
+## MQTT topics (default prefix `dino/player`)
 
-**Commands** (subscribe):
-- `dino/player/command` → JSON `{"action": "play|pause|resume|stop|set_source", "source": "filename.mp3"}`
+**Commands** (`.../command`) JSON:
+- `{"action": "play", "source": "jurassic_park_theme.mp3"}`
+- `{"action": "stop"}`
+- `{"action": "set_source", "source": "jurassic_park_theme.mp3"}`
 
-**State** (publish):
-- `dino/player/state` → `playing` / `paused` / `stopped` / `idle`
-- `dino/player/source` → current filename
-- `dino/player/sources` → JSON list of available files
-- `dino/player/available` → `online` / `offline`
+**State** (published, retained):
+- `available` — `online` / `offline`
+- `state` — `playing` / `stopped`
+- `source` — current filename
+- `sources` — JSON list of files in `media/`
+- `position` — seconds into the track
+- `duration` — track length in seconds
+
+## Adding media
+
+Copy files into `/opt/dino-media-player/media` as user `dino`. The service picks them up within about 5 seconds.
+
+```bash
+sudo cp ~/new_track.mp3 /opt/dino-media-player/media/
+sudo chown dino:dino /opt/dino-media-player/media/new_track.mp3
+```
 
 ## License
 MIT
