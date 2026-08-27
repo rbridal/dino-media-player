@@ -5,10 +5,10 @@ Dino Media Player - MQTT controlled local audio player for Raspberry Pi
 
 import json
 import logging
-import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -35,7 +35,7 @@ class DinoPlayer:
 
         self.mpv_process: Optional[subprocess.Popen] = None
         self.current_source: Optional[str] = None
-        self.state = "stopped"  # stopped | playing | paused
+        self.state = "stopped"
 
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
@@ -121,47 +121,53 @@ class DinoPlayer:
             log.error(f"File not found: {filepath}")
             return
 
-        self.stop()  # ensure clean start
+        self.stop()
 
+        ao = self.cfg.get("audio_output") or "alsa"
         cmd = [
             "mpv",
             "--no-video",
-            "--really-quiet",
+            f"--ao={ao}",
             f"--volume={self.volume}",
-            str(filepath)
+            "--msg-level=ao=v,cplayer=info",
+            str(filepath),
         ]
 
-        # Force analog if needed
-        audio_device = self.cfg.get("audio_device")
+        audio_device = self.cfg.get("audio_device") or ""
         if audio_device:
-            cmd.insert(1, f"--audio-device={audio_device}")
+            cmd.insert(2, f"--audio-device={audio_device}")
 
-        log.info(f"Playing: {filepath}")
+        log.info(f"Playing: {filepath} ({' '.join(cmd[:-1])})")
         self.mpv_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
         self.state = "playing"
         self._publish_state()
 
-        # Monitor process in background
         def monitor():
-            if self.mpv_process:
-                self.mpv_process.wait()
-                if self.state == "playing":
-                    self.state = "stopped"
-                    self._publish_state()
+            proc = self.mpv_process
+            if not proc:
+                return
+            out, _ = proc.communicate()
+            if out:
+                for line in out.strip().splitlines():
+                    log.info(f"mpv: {line}")
+            code = proc.returncode
+            if self.state == "playing":
+                self.state = "stopped"
+                self._publish_state()
+                if code == 0:
                     log.info("Playback finished")
+                else:
+                    log.error(f"mpv exited with code {code}")
 
-        import threading
         threading.Thread(target=monitor, daemon=True).start()
 
     def pause(self):
         if self.mpv_process and self.state == "playing":
-            # mpv doesn't support pause via simple process signal easily
-            # For simplicity we stop and remember position later if needed
-            # Better approach: use mpv JSON IPC in a future version
             self.stop()
             self.state = "paused"
             self._publish_state()
@@ -179,9 +185,10 @@ class DinoPlayer:
             except subprocess.TimeoutExpired:
                 self.mpv_process.kill()
             self.mpv_process = None
-        self.state = "stopped"
-        self._publish_state()
-        log.info("Stopped")
+        if self.state != "paused":
+            self.state = "stopped"
+            self._publish_state()
+            log.info("Stopped")
 
     def run(self):
         host = self.cfg["mqtt"]["host"]
@@ -191,7 +198,6 @@ class DinoPlayer:
         self.client.connect(host, port, 60)
         self.client.loop_start()
 
-        # Keep alive + re-publish sources occasionally
         try:
             while self._running:
                 time.sleep(30)

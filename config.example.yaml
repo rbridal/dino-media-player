@@ -12,6 +12,9 @@ media_dir: "/opt/dino-media-player/media"
 # Default volume (0-100)
 volume: 80
 
-# Force analog output device (usually "Headphones" or "bcm2835 Headphones")
-# Leave empty to use system default
+# Use ALSA on headless Trixie. PipeWire is not configured for the dino user.
+audio_output: "alsa"
+
+# Optional ALSA device. Leave empty first.
+# After `aplay -l`, you can set e.g. "alsa/hw:0,0" or "alsa/plughw:2,0"
 audio_device: ""
