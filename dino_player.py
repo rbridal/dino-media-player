@@ -45,6 +45,7 @@ class DinoPlayer:
         self.position = 0.0
         self.duration = 0.0
         self._last_sources: List[str] = []
+        self._stop_requested = False
 
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
@@ -156,21 +157,22 @@ class DinoPlayer:
         cmd = [
             "mpv",
             "--no-video",
+            "--really-quiet",
             f"--ao={ao}",
             f"--volume={self.volume}",
             f"--input-ipc-server={IPC_PATH}",
-            "--msg-level=ao=v,cplayer=info",
             str(filepath),
         ]
         audio_device = self.cfg.get("audio_device") or ""
         if audio_device:
-            cmd.insert(2, f"--audio-device={audio_device}")
+            cmd.insert(3, f"--audio-device={audio_device}")
 
-        log.info(f"Playing: {filepath} ({' '.join(cmd[:-1])})")
+        log.info(f"Playing: {filepath}")
+        self._stop_requested = False
         self.mpv_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
         )
         self.state = "playing"
@@ -183,17 +185,19 @@ class DinoPlayer:
         proc = self.mpv_process
         if not proc:
             return
-        out, _ = proc.communicate()
-        if out:
-            for line in out.strip().splitlines():
-                log.info(f"mpv: {line}")
+        _, err = proc.communicate()
         code = proc.returncode
+        if err and code not in (0, 4):
+            for line in err.strip().splitlines():
+                log.warning(f"mpv: {line}")
         if self.state == "playing":
             self.state = "stopped"
             self.position = 0.0
             self._publish_state()
-            if code == 0:
+            if code in (0, None) and not self._stop_requested:
                 log.info("Playback finished")
+            elif self._stop_requested or code == 4:
+                log.info("Playback stopped")
             else:
                 log.error(f"mpv exited with code {code}")
 
@@ -211,6 +215,7 @@ class DinoPlayer:
                 self._publish("duration", f"{self.duration:.1f}")
 
     def stop(self, publish: bool = True):
+        self._stop_requested = True
         if self.mpv_process:
             self.mpv_process.terminate()
             try:
@@ -247,6 +252,7 @@ class DinoPlayer:
         self._running = False
         self.stop()
         self._publish_availability("offline")
+        self.client.loop_start if False else None
         self.client.loop_stop()
         self.client.disconnect()
 
