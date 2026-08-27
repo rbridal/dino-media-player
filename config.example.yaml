@@ -6,15 +6,13 @@ mqtt:
   password: ""
   topic_prefix: "dino/player"
 
-# Local media folder (absolute path recommended)
 media_dir: "/opt/dino-media-player/media"
 
-# Default volume (0-100)
 volume: 80
 
 # Use ALSA on headless Trixie. PipeWire is not configured for the dino user.
 audio_output: "alsa"
 
-# Optional ALSA device. Leave empty first.
-# After `aplay -l`, you can set e.g. "alsa/hw:0,0" or "alsa/plughw:2,0"
-audio_device: ""
+# Pi 4 analog jack is usually card 2 (bcm2835 Headphones).
+# HDMI is card 0/1 and fails with ALSA error 524 when nothing is plugged in.
+audio_device: "alsa/plughw:2,0"
