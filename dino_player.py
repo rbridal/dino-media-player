@@ -32,12 +32,14 @@ STATUS_SECONDS = 1
 
 class DinoPlayer:
     def __init__(self, config_path: str = "config.yaml"):
-        with open(config_path) as f:
+        self.config_path = Path(config_path)
+        with open(self.config_path) as f:
             self.cfg = yaml.safe_load(f)
 
         self.media_dir = Path(self.cfg.get("media_dir", "./media")).resolve()
         self.topic_prefix = self.cfg["mqtt"].get("topic_prefix", "dino/player")
-        self.volume = self.cfg.get("volume", 80)
+        self.volume_file = self.config_path.with_name("volume.state")
+        self.volume = self._load_volume()
 
         self.mpv_process: Optional[subprocess.Popen] = None
         self.current_source: Optional[str] = None
@@ -59,6 +61,27 @@ class DinoPlayer:
 
         self._running = True
 
+    def _clamp_volume(self, value) -> int:
+        try:
+            vol = int(round(float(value)))
+        except (TypeError, ValueError):
+            return int(self.cfg.get("volume", 80))
+        return max(0, min(100, vol))
+
+    def _load_volume(self) -> int:
+        if self.volume_file.exists():
+            try:
+                return self._clamp_volume(self.volume_file.read_text().strip())
+            except OSError:
+                pass
+        return self._clamp_volume(self.cfg.get("volume", 80))
+
+    def _save_volume(self) -> None:
+        try:
+            self.volume_file.write_text(str(self.volume))
+        except OSError as exc:
+            log.warning(f"Could not persist volume: {exc}")
+
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         log.info(f"Connected to MQTT broker (rc={reason_code})")
         client.subscribe(f"{self.topic_prefix}/command")
@@ -71,8 +94,10 @@ class DinoPlayer:
             payload = json.loads(msg.payload.decode())
             action = payload.get("action", "").lower()
             source = payload.get("source")
-            log.info(f"Command received: {action} source={source}")
+            log.info(f"Command received: {action} source={source} volume={payload.get('volume')}")
             if action == "play":
+                if payload.get("volume") is not None:
+                    self.set_volume(payload.get("volume"), apply=False)
                 self.play(source)
             elif action == "stop":
                 self.stop()
@@ -80,6 +105,8 @@ class DinoPlayer:
                 if source:
                     self.current_source = source
                     self._publish_state()
+            elif action == "set_volume":
+                self.set_volume(payload.get("volume"))
             else:
                 log.warning(f"Unknown action: {action}")
         except Exception as e:
@@ -111,6 +138,7 @@ class DinoPlayer:
         self._publish("source", self.current_source or "")
         self._publish("position", f"{self.position:.1f}")
         self._publish("duration", f"{self.duration:.1f}")
+        self._publish("volume", str(self.volume))
 
     def _mpv_cmd(self, command: list) -> Optional[dict]:
         if not os.path.exists(IPC_PATH):
@@ -129,6 +157,16 @@ class DinoPlayer:
         except json.JSONDecodeError:
             return None
         return None
+
+    def set_volume(self, value, apply: bool = True) -> None:
+        self.volume = self._clamp_volume(value)
+        self._save_volume()
+        if apply and self.state == "playing":
+            result = self._mpv_cmd(["set_property", "volume", self.volume])
+            if result and result.get("error") not in (None, "success"):
+                log.warning(f"mpv volume set failed: {result}")
+        self._publish("volume", str(self.volume))
+        log.info(f"Volume set to {self.volume}")
 
     def play(self, source: Optional[str] = None):
         if source:
@@ -167,7 +205,7 @@ class DinoPlayer:
         if audio_device:
             cmd.insert(3, f"--audio-device={audio_device}")
 
-        log.info(f"Playing: {filepath}")
+        log.info(f"Playing: {filepath} volume={self.volume}")
         self._stop_requested = False
         self.mpv_process = subprocess.Popen(
             cmd,
@@ -252,7 +290,6 @@ class DinoPlayer:
         self._running = False
         self.stop()
         self._publish_availability("offline")
-        self.client.loop_start if False else None
         self.client.loop_stop()
         self.client.disconnect()
 
