@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -29,17 +30,35 @@ IPC_PATH = "/tmp/dino-mpv.sock"
 SCAN_SECONDS = 5
 STATUS_SECONDS = 1
 
+DEFAULT_OUTPUTS = {
+    "analog": {
+        "label": "3.5mm jack",
+        "audio_output": "alsa",
+        "audio_device": "alsa/plughw:2,0",
+    },
+    "bluetooth": {
+        "label": "BT-WUZHI",
+        "audio_output": "alsa",
+        "audio_device": "alsa/bluealsa",
+        "bluetooth_name": "BT-WUZHI",
+    },
+}
+
 
 class DinoPlayer:
     def __init__(self, config_path: str = "config.yaml"):
         self.config_path = Path(config_path)
         with open(self.config_path) as f:
-            self.cfg = yaml.safe_load(f)
+            self.cfg = yaml.safe_load(f) or {}
 
         self.media_dir = Path(self.cfg.get("media_dir", "./media")).resolve()
         self.topic_prefix = self.cfg["mqtt"].get("topic_prefix", "dino/player")
         self.volume_file = self.config_path.with_name("volume.state")
+        self.output_file = self.config_path.with_name("output.state")
         self.volume = self._load_volume()
+        self.outputs = self.cfg.get("outputs") or DEFAULT_OUTPUTS
+        self.output_key = self._load_output_key()
+        self.downmix_mono = bool(self.cfg.get("downmix_mono", True))
 
         self.mpv_process: Optional[subprocess.Popen] = None
         self.current_source: Optional[str] = None
@@ -82,11 +101,44 @@ class DinoPlayer:
         except OSError as exc:
             log.warning(f"Could not persist volume: {exc}")
 
+    def _load_output_key(self) -> str:
+        if self.output_file.exists():
+            try:
+                key = self.output_file.read_text().strip()
+                if key in self.outputs:
+                    return key
+            except OSError:
+                pass
+        key = str(self.cfg.get("output", "analog"))
+        return key if key in self.outputs else next(iter(self.outputs))
+
+    def _save_output_key(self) -> None:
+        try:
+            self.output_file.write_text(self.output_key)
+        except OSError as exc:
+            log.warning(f"Could not persist output: {exc}")
+
+    def _output_cfg(self) -> dict:
+        return self.outputs.get(self.output_key) or {}
+
+    def _output_label(self, key: Optional[str] = None) -> str:
+        cfg = self.outputs.get(key or self.output_key) or {}
+        return str(cfg.get("label") or key or self.output_key)
+
+    def _key_from_label(self, value: str) -> Optional[str]:
+        if value in self.outputs:
+            return value
+        for key, cfg in self.outputs.items():
+            if str(cfg.get("label")) == value:
+                return key
+        return None
+
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         log.info(f"Connected to MQTT broker (rc={reason_code})")
         client.subscribe(f"{self.topic_prefix}/command")
         self._publish_availability("online")
         self._publish_sources(force=True)
+        self._publish_outputs()
         self._publish_state()
 
     def _on_message(self, client, userdata, msg):
@@ -94,10 +146,15 @@ class DinoPlayer:
             payload = json.loads(msg.payload.decode())
             action = payload.get("action", "").lower()
             source = payload.get("source")
-            log.info(f"Command received: {action} source={source} volume={payload.get('volume')}")
+            log.info(
+                f"Command received: {action} source={source} "
+                f"volume={payload.get('volume')} output={payload.get('output')}"
+            )
             if action == "play":
                 if payload.get("volume") is not None:
                     self.set_volume(payload.get("volume"), apply=False)
+                if payload.get("output"):
+                    self.set_output(payload.get("output"), persist=True)
                 self.play(source)
             elif action == "stop":
                 self.stop()
@@ -107,6 +164,8 @@ class DinoPlayer:
                     self._publish_state()
             elif action == "set_volume":
                 self.set_volume(payload.get("volume"))
+            elif action == "set_output":
+                self.set_output(payload.get("output") or "")
             else:
                 log.warning(f"Unknown action: {action}")
         except Exception as e:
@@ -133,12 +192,18 @@ class DinoPlayer:
             self._publish("sources", json.dumps(sources))
             log.info(f"Available sources: {sources}")
 
+    def _publish_outputs(self):
+        labels = [self._output_label(k) for k in self.outputs]
+        self._publish("outputs", json.dumps(labels))
+        self._publish("output", self._output_label())
+
     def _publish_state(self):
         self._publish("state", self.state)
         self._publish("source", self.current_source or "")
         self._publish("position", f"{self.position:.1f}")
         self._publish("duration", f"{self.duration:.1f}")
         self._publish("volume", str(self.volume))
+        self._publish("output", self._output_label())
 
     def _mpv_cmd(self, command: list) -> Optional[dict]:
         if not os.path.exists(IPC_PATH):
@@ -168,6 +233,76 @@ class DinoPlayer:
         self._publish("volume", str(self.volume))
         log.info(f"Volume set to {self.volume}")
 
+    def set_output(self, value: str, persist: bool = True) -> None:
+        key = self._key_from_label(str(value).strip())
+        if not key:
+            log.warning(f"Unknown output: {value}")
+            return
+        if key == self.output_key:
+            self._publish_outputs()
+            return
+        was_playing = self.state == "playing"
+        source = self.current_source
+        if was_playing:
+            self.stop(publish=False)
+        self.output_key = key
+        if persist:
+            self._save_output_key()
+        log.info(f"Output set to {self._output_label()} ({key})")
+        self._publish_outputs()
+        if was_playing:
+            self.play(source)
+
+    def _resolve_mac(self, name: str) -> Optional[str]:
+        try:
+            out = subprocess.check_output(["bluetoothctl", "devices"], text=True, timeout=8)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(f"bluetoothctl devices failed: {exc}")
+            return None
+        for line in out.splitlines():
+            if name in line:
+                parts = line.split()
+                if len(parts) >= 2 and re.match(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", parts[1]):
+                    return parts[1]
+        return None
+
+    def _audio_device(self) -> tuple[str, str]:
+        cfg = self._output_cfg()
+        ao = cfg.get("audio_output") or self.cfg.get("audio_output") or "alsa"
+        device = cfg.get("audio_device") or self.cfg.get("audio_device") or ""
+        mac = (cfg.get("bluetooth_mac") or "").strip()
+        name = (cfg.get("bluetooth_name") or "").strip()
+        if name and not mac:
+            mac = self._resolve_mac(name) or ""
+        if mac and "bluealsa" in str(device) and "DEV=" not in str(device):
+            device = f"alsa/bluealsa:DEV={mac},PROFILE=a2dp"
+        return ao, device
+
+    def _ensure_bluetooth(self) -> None:
+        cfg = self._output_cfg()
+        name = (cfg.get("bluetooth_name") or "").strip()
+        if not name and "bluealsa" not in str(cfg.get("audio_device") or ""):
+            return
+        mac = (cfg.get("bluetooth_mac") or "").strip() or (self._resolve_mac(name) if name else "")
+        if not mac:
+            log.warning("Bluetooth MAC unknown; pair with scripts/pair-bt-wuzhi.sh")
+            return
+        log.info(f"Connecting Bluetooth {name or mac} ({mac})")
+        try:
+            result = subprocess.run(
+                ["bluetoothctl", "connect", mac],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if result.returncode != 0:
+                log.warning(f"bluetoothctl connect: {result.stdout} {result.stderr}")
+            else:
+                log.info("Bluetooth connected")
+            time.sleep(1.0)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(f"Bluetooth connect failed: {exc}")
+
     def play(self, source: Optional[str] = None):
         if source:
             self.current_source = source
@@ -185,13 +320,17 @@ class DinoPlayer:
             return
 
         self.stop(publish=False)
+        if self._output_cfg().get("bluetooth_name") or "bluealsa" in str(
+            self._output_cfg().get("audio_device") or ""
+        ):
+            self._ensure_bluetooth()
 
         try:
             os.unlink(IPC_PATH)
         except FileNotFoundError:
             pass
 
-        ao = self.cfg.get("audio_output") or "alsa"
+        ao, audio_device = self._audio_device()
         cmd = [
             "mpv",
             "--no-video",
@@ -199,13 +338,17 @@ class DinoPlayer:
             f"--ao={ao}",
             f"--volume={self.volume}",
             f"--input-ipc-server={IPC_PATH}",
-            str(filepath),
         ]
-        audio_device = self.cfg.get("audio_device") or ""
+        if self.downmix_mono:
+            cmd.append("--audio-channels=mono")
         if audio_device:
-            cmd.insert(3, f"--audio-device={audio_device}")
+            cmd.append(f"--audio-device={audio_device}")
+        cmd.append(str(filepath))
 
-        log.info(f"Playing: {filepath} volume={self.volume}")
+        log.info(
+            f"Playing: {filepath} volume={self.volume} "
+            f"output={self._output_label()} device={audio_device or ao}"
+        )
         self._stop_requested = False
         self.mpv_process = subprocess.Popen(
             cmd,

@@ -1,18 +1,29 @@
 # MQTT Broker (Home Assistant Mosquitto recommended)
 mqtt:
-  host: "ha.delrobco.com"          # or the ZeroTier IP / hostname of your HA
+  host: "ha.delrobco.com"
   port: 1883
-  username: ""                    # if required
+  username: ""
   password: ""
   topic_prefix: "dino/player"
 
 media_dir: "/opt/dino-media-player/media"
-
 volume: 80
 
-# Use ALSA on headless Trixie. PipeWire is not configured for the dino user.
-audio_output: "alsa"
+# Mix stereo down to one channel. Keep this on while only the left speaker is wired.
+downmix_mono: true
 
-# Pi 4 analog jack is usually card 2 (bcm2835 Headphones).
-# HDMI is card 0/1 and fails with ALSA error 524 when nothing is plugged in.
-audio_device: "alsa/plughw:2,0"
+# Default output key (must match an entry under outputs:)
+output: analog
+
+outputs:
+  analog:
+    label: "3.5mm jack"
+    audio_output: alsa
+    audio_device: "alsa/plughw:2,0"
+  bluetooth:
+    label: "BT-WUZHI"
+    audio_output: alsa
+    # MAC is filled in after pairing; the player can also resolve BT-WUZHI by name.
+    audio_device: "alsa/bluealsa"
+    bluetooth_name: "BT-WUZHI"
+    bluetooth_mac: ""
