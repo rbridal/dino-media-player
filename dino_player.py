@@ -31,6 +31,7 @@ IPC_PATH = "/tmp/dino-mpv.sock"
 SCAN_SECONDS = 5
 STATUS_SECONDS = 1
 BT_RETRY_SECONDS = 20
+IDLE_SOURCES = {"", "none", "off", "stop"}
 
 DEFAULT_OUTPUTS = {
     "analog": {
@@ -158,20 +159,28 @@ class DinoPlayer:
                 f"Command received: {action} source={source} "
                 f"volume={payload.get('volume')} output={payload.get('output')}"
             )
+            if payload.get("volume") is not None and action in (
+                "play",
+                "set_source",
+                "set_volume",
+            ):
+                apply = action == "set_volume" or self.state == "playing"
+                self.set_volume(payload.get("volume"), apply=apply)
             if action == "play":
-                if payload.get("volume") is not None:
-                    self.set_volume(payload.get("volume"), apply=False)
                 if payload.get("output"):
                     self.set_output(payload.get("output"), persist=True)
                 self.play(source)
             elif action == "stop":
                 self.stop()
             elif action == "set_source":
-                if source:
-                    self.current_source = source
-                    self._publish_state()
+                if payload.get("output"):
+                    self.set_output(payload.get("output"), persist=True)
+                if source is None or str(source).strip().lower() in IDLE_SOURCES:
+                    self.stop()
+                else:
+                    self.play(str(source).strip())
             elif action == "set_volume":
-                self.set_volume(payload.get("volume"))
+                pass
             elif action == "set_output":
                 self.set_output(payload.get("output") or "")
             elif action == "reconnect":
@@ -257,7 +266,7 @@ class DinoPlayer:
         was_playing = self.state == "playing"
         source = self.current_source
         if was_playing:
-            self.stop(publish=False)
+            self.stop(publish=False, clear_source=False)
         self.output_key = key
         if persist:
             self._save_output_key()
@@ -373,14 +382,11 @@ class DinoPlayer:
             log.info(f"Bluetooth status: {status}")
 
     def play(self, source: Optional[str] = None):
-        if source:
-            self.current_source = source
+        if source and str(source).strip().lower() not in IDLE_SOURCES:
+            self.current_source = str(source).strip()
         if not self.current_source:
-            sources = self.get_sources()
-            if not sources:
-                log.error("No media files found")
-                return
-            self.current_source = sources[0]
+            log.error("No media selected")
+            return
 
         filepath = self.media_dir / self.current_source
         if not filepath.exists():
@@ -388,7 +394,7 @@ class DinoPlayer:
             log.error(f"File not found: {filepath}")
             return
 
-        self.stop(publish=False)
+        self.stop(publish=False, clear_source=False)
         if self._is_bluetooth_output():
             self._refresh_link(force_reconnect=True, force_publish=True)
 
@@ -441,6 +447,7 @@ class DinoPlayer:
         if self.state == "playing":
             self.state = "stopped"
             self.position = 0.0
+            self.current_source = None
             self._publish_state()
             if code in (0, None) and not self._stop_requested:
                 log.info("Playback finished")
@@ -462,7 +469,7 @@ class DinoPlayer:
                 self._publish("position", f"{self.position:.1f}")
                 self._publish("duration", f"{self.duration:.1f}")
 
-    def stop(self, publish: bool = True):
+    def stop(self, publish: bool = True, clear_source: bool = True):
         self._stop_requested = True
         if self.mpv_process:
             self.mpv_process.terminate()
@@ -473,6 +480,8 @@ class DinoPlayer:
             self.mpv_process = None
         self.state = "stopped"
         self.position = 0.0
+        if clear_source:
+            self.current_source = None
         if publish:
             self._publish_state()
             log.info("Stopped")
