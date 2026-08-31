@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -29,6 +30,7 @@ log = logging.getLogger("dino-player")
 IPC_PATH = "/tmp/dino-mpv.sock"
 SCAN_SECONDS = 5
 STATUS_SECONDS = 1
+BT_RETRY_SECONDS = 20
 
 DEFAULT_OUTPUTS = {
     "analog": {
@@ -65,12 +67,16 @@ class DinoPlayer:
         self.state = "stopped"
         self.position = 0.0
         self.duration = 0.0
+        self.bt_status = "unknown"
         self._last_sources: List[str] = []
+        self._last_bt_status = ""
+        self._last_bt_try = 0.0
         self._stop_requested = False
 
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
+        self.client.will_set(f"{self.topic_prefix}/available", "offline", qos=1, retain=True)
 
         if self.cfg["mqtt"].get("username"):
             self.client.username_pw_set(
@@ -140,6 +146,8 @@ class DinoPlayer:
         self._publish_sources(force=True)
         self._publish_outputs()
         self._publish_state()
+        self._refresh_link(force_publish=True)
+        self._publish_heartbeat()
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -166,6 +174,8 @@ class DinoPlayer:
                 self.set_volume(payload.get("volume"))
             elif action == "set_output":
                 self.set_output(payload.get("output") or "")
+            elif action == "reconnect":
+                self._refresh_link(force_reconnect=True, force_publish=True)
             else:
                 log.warning(f"Unknown action: {action}")
         except Exception as e:
@@ -184,6 +194,9 @@ class DinoPlayer:
 
     def _publish_availability(self, status: str):
         self._publish("available", status)
+
+    def _publish_heartbeat(self):
+        self._publish("heartbeat", datetime.now(timezone.utc).isoformat(), retain=True)
 
     def _publish_sources(self, force: bool = False):
         sources = self.get_sources()
@@ -250,6 +263,7 @@ class DinoPlayer:
             self._save_output_key()
         log.info(f"Output set to {self._output_label()} ({key})")
         self._publish_outputs()
+        self._refresh_link(force_reconnect=self._is_bluetooth_output(), force_publish=True)
         if was_playing:
             self.play(source)
 
@@ -266,27 +280,51 @@ class DinoPlayer:
                     return parts[1]
         return None
 
+    def _bt_mac(self) -> Optional[str]:
+        cfg = self._output_cfg()
+        mac = (cfg.get("bluetooth_mac") or "").strip()
+        name = (cfg.get("bluetooth_name") or "").strip()
+        if mac:
+            return mac
+        if name:
+            return self._resolve_mac(name)
+        return None
+
+    def _is_bluetooth_output(self) -> bool:
+        cfg = self._output_cfg()
+        return bool(cfg.get("bluetooth_name") or "bluealsa" in str(cfg.get("audio_device") or ""))
+
+    def _bt_connected(self) -> bool:
+        mac = self._bt_mac()
+        if not mac:
+            return False
+        try:
+            out = subprocess.check_output(
+                ["bluetoothctl", "info", mac], text=True, timeout=8
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return any(line.strip() == "Connected: yes" for line in out.splitlines())
+
     def _audio_device(self) -> tuple[str, str]:
         cfg = self._output_cfg()
         ao = cfg.get("audio_output") or self.cfg.get("audio_output") or "alsa"
         device = cfg.get("audio_device") or self.cfg.get("audio_device") or ""
-        mac = (cfg.get("bluetooth_mac") or "").strip()
-        name = (cfg.get("bluetooth_name") or "").strip()
-        if name and not mac:
-            mac = self._resolve_mac(name) or ""
+        mac = self._bt_mac() or ""
         if mac and "bluealsa" in str(device) and "DEV=" not in str(device):
             device = f"alsa/bluealsa:DEV={mac},PROFILE=a2dp"
         return ao, device
 
-    def _ensure_bluetooth(self) -> None:
-        cfg = self._output_cfg()
-        name = (cfg.get("bluetooth_name") or "").strip()
-        if not name and "bluealsa" not in str(cfg.get("audio_device") or ""):
-            return
-        mac = (cfg.get("bluetooth_mac") or "").strip() or (self._resolve_mac(name) if name else "")
+    def _ensure_bluetooth(self) -> bool:
+        if not self._is_bluetooth_output():
+            return True
+        mac = self._bt_mac()
+        name = (self._output_cfg().get("bluetooth_name") or "").strip()
         if not mac:
             log.warning("Bluetooth MAC unknown; pair with scripts/pair-bt-wuzhi.sh")
-            return
+            return False
+        if self._bt_connected():
+            return True
         log.info(f"Connecting Bluetooth {name or mac} ({mac})")
         try:
             result = subprocess.run(
@@ -302,6 +340,37 @@ class DinoPlayer:
             time.sleep(1.0)
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning(f"Bluetooth connect failed: {exc}")
+            return False
+        return self._bt_connected()
+
+    def _refresh_link(self, force_reconnect: bool = False, force_publish: bool = False) -> None:
+        if not self._is_bluetooth_output():
+            status = "not_required"
+        elif force_reconnect or not self._bt_connected():
+            now = time.time()
+            if force_reconnect or now - self._last_bt_try >= BT_RETRY_SECONDS:
+                self._last_bt_try = now
+                status = "reconnecting"
+                self._publish_bt(status)
+                status = "connected" if self._ensure_bluetooth() else "disconnected"
+            else:
+                status = "disconnected"
+        else:
+            status = "connected"
+        self.bt_status = status
+        self._publish_bt(status, force=force_publish)
+
+    def _publish_bt(self, status: str, force: bool = False) -> None:
+        if not force and status == self._last_bt_status:
+            return
+        self._last_bt_status = status
+        self._publish("bluetooth", status)
+        connected = "on" if status == "connected" else "off"
+        if status == "not_required":
+            connected = "n/a"
+        self._publish("bluetooth_connected", connected)
+        if status != "not_required":
+            log.info(f"Bluetooth status: {status}")
 
     def play(self, source: Optional[str] = None):
         if source:
@@ -320,10 +389,8 @@ class DinoPlayer:
             return
 
         self.stop(publish=False)
-        if self._output_cfg().get("bluetooth_name") or "bluealsa" in str(
-            self._output_cfg().get("audio_device") or ""
-        ):
-            self._ensure_bluetooth()
+        if self._is_bluetooth_output():
+            self._refresh_link(force_reconnect=True, force_publish=True)
 
         try:
             os.unlink(IPC_PATH)
@@ -414,13 +481,15 @@ class DinoPlayer:
         host = self.cfg["mqtt"]["host"]
         port = self.cfg["mqtt"].get("port", 1883)
         log.info(f"Connecting to MQTT {host}:{port}")
-        self.client.connect(host, port, 60)
+        self.client.connect(host, port, keepalive=30)
         self.client.loop_start()
 
         try:
             while self._running:
                 time.sleep(SCAN_SECONDS)
                 self._publish_sources()
+                self._publish_heartbeat()
+                self._refresh_link()
         except KeyboardInterrupt:
             pass
         finally:
