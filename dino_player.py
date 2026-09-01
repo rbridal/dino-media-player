@@ -74,6 +74,7 @@ class DinoPlayer:
         self._last_bt_try = 0.0
         self._stop_requested = False
         self._awaiting_start = False
+        self._eof_ticks = 0
         self._mpv_device: Optional[tuple[str, str]] = None
         self._poll_started = False
 
@@ -167,8 +168,7 @@ class DinoPlayer:
                 "set_source",
                 "set_volume",
             ):
-                apply = True
-                self.set_volume(payload.get("volume"), apply=apply)
+                self.set_volume(payload.get("volume"), apply=True)
             if action == "play":
                 if payload.get("output"):
                     self.set_output(payload.get("output"), persist=True)
@@ -426,13 +426,19 @@ class DinoPlayer:
         cmd = [
             "mpv",
             "--idle=yes",
+            "--keep-open=yes",
+            "--keep-open-pause=yes",
+            "--gapless-audio=yes",
             "--force-window=no",
             "--no-video",
             "--really-quiet",
+            "--no-input-default-bindings",
+            "--input-vo-keyboard=no",
+            "--audio-samplerate=48000",
+            "--audio-format=s16",
             f"--ao={ao}",
             f"--volume={self.volume}",
             f"--input-ipc-server={IPC_PATH}",
-            "--idle=once" if False else "--idle=yes",
         ]
         if self.downmix_mono:
             cmd.append("--audio-channels=mono")
@@ -443,8 +449,7 @@ class DinoPlayer:
         self.mpv_process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+            stderr=subprocess.DEVNULL,
         )
         self._mpv_device = (ao, device)
         if not self._wait_for_ipc():
@@ -474,6 +479,8 @@ class DinoPlayer:
             return
 
         self._stop_requested = False
+        self._eof_ticks = 0
+        self._mpv_cmd(["set_property", "pause", "no"])
         self._mpv_cmd(["set_property", "volume", self.volume])
         result = self._mpv_cmd(["loadfile", str(filepath), "replace"])
         if not result or result.get("error") not in (None, "success"):
@@ -503,13 +510,10 @@ class DinoPlayer:
         proc = self.mpv_process
         if not proc:
             return
-        _, err = proc.communicate()
+        proc.wait()
         if proc is not self.mpv_process:
             return
         code = proc.returncode
-        if err and code not in (0, 4):
-            for line in err.strip().splitlines()[:20]:
-                log.warning(f"mpv: {line}")
         if code not in (0, 4, None):
             log.error(f"mpv exited with code {code}")
         self.mpv_process = None
@@ -520,40 +524,54 @@ class DinoPlayer:
             self.current_source = None
             self._publish_state()
 
+    def _finished(self) -> None:
+        if self._stop_requested:
+            log.info("Playback stopped")
+        else:
+            log.info("Playback finished")
+        self.state = "stopped"
+        self.position = 0.0
+        self.current_source = None
+        self._eof_ticks = 0
+        self._awaiting_start = False
+        self._publish_state()
+
     def _poll_status(self):
         while self._running:
             time.sleep(STATUS_SECONDS)
             if self.state != "playing":
+                self._eof_ticks = 0
                 continue
-            idle = self._mpv_cmd(["get_property", "idle-active"])
-            idle_flag = bool(idle and idle.get("error") == "success" and idle.get("data") is True)
-            if self._awaiting_start:
-                if not idle_flag:
-                    self._awaiting_start = False
-                continue
-            if idle_flag:
-                if self._stop_requested:
-                    log.info("Playback stopped")
-                else:
-                    log.info("Playback finished")
-                self.state = "stopped"
-                self.position = 0.0
-                self.current_source = None
-                self._publish_state()
-                continue
-            dur = self._mpv_cmd(["get_property", "duration"])
             pos = self._mpv_cmd(["get_property", "time-pos"])
+            dur = self._mpv_cmd(["get_property", "duration"])
+            eof = self._mpv_cmd(["get_property", "eof-reached"])
+            pos_val = None
+            if pos and pos.get("error") == "success" and pos.get("data") is not None:
+                pos_val = float(pos["data"])
+                self.position = pos_val
             if dur and dur.get("error") == "success" and dur.get("data") is not None:
                 self.duration = float(dur["data"])
-            if pos and pos.get("error") == "success" and pos.get("data") is not None:
-                self.position = float(pos["data"])
+            if self._awaiting_start:
+                if pos_val is not None and pos_val > 0.15:
+                    self._awaiting_start = False
+                continue
+            eof_flag = bool(eof and eof.get("error") == "success" and eof.get("data") is True)
+            near_end = self.duration > 1 and pos_val is not None and pos_val >= max(0.0, self.duration - 0.25)
+            if eof_flag or near_end:
+                self._eof_ticks += 1
+                if self._eof_ticks >= 2:
+                    self._finished()
+                continue
+            self._eof_ticks = 0
             self._publish("position", f"{self.position:.1f}")
             self._publish("duration", f"{self.duration:.1f}")
 
     def stop(self, publish: bool = True, clear_source: bool = True):
         self._stop_requested = True
         self._awaiting_start = False
+        self._eof_ticks = 0
         if self.mpv_process and self.mpv_process.poll() is None:
+            self._mpv_cmd(["set_property", "pause", "yes"])
             self._mpv_cmd(["stop"])
         self.state = "stopped"
         self.position = 0.0
