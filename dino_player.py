@@ -459,6 +459,15 @@ class DinoPlayer:
         threading.Thread(target=self._watch_mpv, daemon=True).start()
         return True
 
+    def _unpause(self) -> None:
+        for _ in range(20):
+            self._mpv_cmd(["set_property", "pause", False])
+            paused = self._mpv_cmd(["get_property", "pause"])
+            if paused and paused.get("error") == "success" and paused.get("data") is False:
+                return
+            time.sleep(0.05)
+        log.warning("mpv stayed paused after loadfile")
+
     def play(self, source: Optional[str] = None):
         if source and str(source).strip().lower() not in IDLE_SOURCES:
             self.current_source = str(source).strip()
@@ -480,7 +489,6 @@ class DinoPlayer:
 
         self._stop_requested = False
         self._eof_ticks = 0
-        self._mpv_cmd(["set_property", "pause", "no"])
         self._mpv_cmd(["set_property", "volume", self.volume])
         result = self._mpv_cmd(["loadfile", str(filepath), "replace"])
         if not result or result.get("error") not in (None, "success"):
@@ -492,6 +500,7 @@ class DinoPlayer:
             if not result or result.get("error") not in (None, "success"):
                 log.error(f"loadfile failed after restart: {result}")
                 return
+        self._unpause()
 
         log.info(
             f"Playing: {filepath} volume={self.volume} "
@@ -542,6 +551,8 @@ class DinoPlayer:
             if self.state != "playing":
                 self._eof_ticks = 0
                 continue
+            if self._awaiting_start:
+                self._unpause()
             pos = self._mpv_cmd(["get_property", "time-pos"])
             dur = self._mpv_cmd(["get_property", "duration"])
             eof = self._mpv_cmd(["get_property", "eof-reached"])
@@ -571,8 +582,7 @@ class DinoPlayer:
         self._awaiting_start = False
         self._eof_ticks = 0
         if self.mpv_process and self.mpv_process.poll() is None:
-            self._mpv_cmd(["set_property", "pause", "yes"])
-            self._mpv_cmd(["stop"])
+            self._mpv_cmd(["set_property", "pause", True])
         self.state = "stopped"
         self.position = 0.0
         if clear_source:
