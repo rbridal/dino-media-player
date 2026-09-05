@@ -355,17 +355,17 @@ class DinoPlayer:
     def _refresh_link(self, force_reconnect: bool = False, force_publish: bool = False) -> None:
         if not self._is_bluetooth_output():
             status = "not_required"
-        elif force_reconnect or not self._bt_connected():
+        elif self._bt_connected() and not force_reconnect:
+            status = "connected"
+        else:
             now = time.time()
-            if force_reconnect or now - self._last_bt_try >= BT_RETRY_SECONDS:
+            due = force_reconnect or now - self._last_bt_try >= BT_RETRY_SECONDS
+            if due:
                 self._last_bt_try = now
-                status = "reconnecting"
-                self._publish_bt(status)
+                log.info("Bluetooth reconnect attempt")
                 status = "connected" if self._ensure_bluetooth() else "disconnected"
             else:
                 status = "disconnected"
-        else:
-            status = "connected"
         self.bt_status = status
         self._publish_bt(status, force=force_publish)
 
