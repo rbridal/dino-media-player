@@ -3,7 +3,8 @@
 Raspberry Pi media player service for the outdoor Dino setup.
 
 ## Ownership
-- **Masta-Rob** owns this home project DIRECTIVES.md. Flag Rob only for policy changes.
+- **Casa-Rob** owns this home project. Masta-Rob only routes.
+- Flag Rob only for real policy changes.
 
 ## Safety (always wins)
 - No secrets in git. Prefer estate network patterns already in use at the House.
@@ -19,4 +20,5 @@ Raspberry Pi media player service for the outdoor Dino setup.
 - No secrets in git. Nothing deployed without Rob's OK.
 
 ## Change log
-- 2026-11-04 — Masta-Rob — Initial DIRECTIVES.md (Rob's OK: yes, pt1410u).
+- 2026-11-04 — Masta-Rob — Initial DIRECTIVES.md.
+- 2026-11-13 — Rob — Ownership moved to Casa-Rob (home).
